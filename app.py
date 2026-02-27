@@ -36,7 +36,7 @@ AI_CONFIG = {
         "key_label": "Google Gemini API Key",
         "placeholder": "AIza...",
         "api_url": "https://aistudio.google.com/app/apikey",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-2.5-flash",
     },
     "perplexity": {
         "name": "Perplexity",
@@ -90,7 +90,7 @@ def call_openai(api_key: str, prompt: str) -> str:
 
 def call_gemini(api_key: str, prompt: str) -> str:
     """Google Gemini 호출"""
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key.strip())
     result = client.models.generate_content(
         model=AI_CONFIG["gemini"]["model"],
         contents=prompt,
@@ -279,10 +279,12 @@ if analyze_button:
     # -------------------------------------------------------------------------
     # 일반 모드: 개별 답변 → 종합
     # -------------------------------------------------------------------------
+    reviews_summary = None  # 심층 모드에서만 사용
+    raw_responses = {}  # 탭 "모델별 개별 답변"용
+
     if not is_deep_mode:
-        st.markdown("### 📋 1단계: 각 AI의 초기 분석")
         responses = {}
-        with st.spinner("각 AI가 논문을 분석하고 있습니다..."):
+        with st.spinner("AI들이 논문을 분석하고 있습니다..."):
             for ai_id, api_key in available_ais.items():
                 prompt = f"""다음 논문 관련 내용을 분석해주세요. 연구자 관점에서 핵심을 짚어주세요.
 
@@ -295,12 +297,7 @@ if analyze_button:
                 except Exception as e:
                     responses[ai_id] = f"❌ 오류 발생: {str(e)}"
 
-        cols = st.columns(min(len(responses), 3))
-        for idx, (ai_id, resp) in enumerate(responses.items()):
-            with cols[idx % len(cols)]:
-                with st.expander(f"**{AI_CONFIG[ai_id]['name']}** 답변", expanded=True):
-                    st.markdown(resp or "*답변 없음*")
-
+        raw_responses = {ai_id: {"답변": resp} for ai_id, resp in responses.items()}
         valid_responses = {
             k: v for k, v in responses.items()
             if v and "❌ 오류 발생" not in v
@@ -310,15 +307,13 @@ if analyze_button:
     # 심층 토론 모드: A 답변 → B 검토 → A 수정 → 종합
     # -------------------------------------------------------------------------
     else:
-        st.markdown("### 📋 심층 토론 모드: 상호 비판 (Cross-Review)")
         if len(ai_list) < 2:
             st.warning("⚠️ 심층 토론 모드에는 최소 2개 이상의 AI가 필요합니다. API 키를 더 추가하세요.")
             st.stop()
 
         # Round 1: 각 AI 초기 답변
-        st.markdown("#### 1단계: 각 AI의 초기 답변")
         initial_responses = {}
-        with st.spinner("각 AI가 초기 답변을 작성하고 있습니다..."):
+        with st.spinner("AI들이 토론 중입니다... (1/4) 초기 답변 작성"):
             for ai_id, api_key in available_ais.items():
                 prompt = f"""다음 논문 관련 내용을 분석해주세요. 연구자 관점에서 핵심을 짚어주세요.
 
@@ -331,10 +326,6 @@ if analyze_button:
                 except Exception as e:
                     initial_responses[ai_id] = f"❌ 오류 발생: {str(e)}"
 
-        for ai_id, resp in initial_responses.items():
-            with st.expander(f"**{AI_CONFIG[ai_id]['name']}** 초기 답변", expanded=False):
-                st.markdown(resp or "*답변 없음*")
-
         valid_initial = {
             k: v for k, v in initial_responses.items()
             if v and "❌ 오류 발생" not in v
@@ -342,18 +333,19 @@ if analyze_button:
         if len(valid_initial) < 2:
             st.warning("유효한 답변이 2개 미만입니다. 심층 토론을 진행할 수 없습니다.")
             valid_responses = valid_initial
+            raw_responses = {ai_id: {"초기 답변": resp} for ai_id, resp in initial_responses.items()}
         else:
             # Round 2: B가 A의 답변 검토 (라운드 로빈)
-            st.markdown("#### 2단계: 상호 검토 (논리적 오류·빠진 데이터 지적)")
             reviews = {}
             reviewer_ids = list(valid_initial.keys())
-            for i, author_id in enumerate(reviewer_ids):
-                reviewer_id = reviewer_ids[(i + 1) % len(reviewer_ids)]
-                if author_id == reviewer_id:
-                    continue
-                author_resp = valid_initial[author_id]
-                api_key = api_keys[reviewer_id]
-                review_prompt = f"""다음은 다른 AI의 논문 분석 답변입니다.
+            with st.spinner("AI들이 토론 중입니다... (2/4) 상호 검토"):
+                for i, author_id in enumerate(reviewer_ids):
+                    reviewer_id = reviewer_ids[(i + 1) % len(reviewer_ids)]
+                    if author_id == reviewer_id:
+                        continue
+                    author_resp = valid_initial[author_id]
+                    api_key = api_keys[reviewer_id]
+                    review_prompt = f"""다음은 다른 AI의 논문 분석 답변입니다.
 당신의 역할: **비평가**. 이 답변에서 논리적 오류, 빠진 데이터, 부족한 근거, 또는 개선이 필요한 부분을 구체적으로 지적해주세요.
 
 **검토 대상 답변 (작성: {AI_CONFIG[author_id]['name']}):**
@@ -362,23 +354,28 @@ if analyze_button:
 ---
 **지적 사항 (bullet point로 구체적으로):**
 """
-                try:
-                    review = CALL_FUNCTIONS[reviewer_id](api_key, review_prompt)
-                    reviews[author_id] = (reviewer_id, review)
-                except Exception as e:
-                    reviews[author_id] = (reviewer_id, f"❌ 검토 오류: {str(e)}")
+                    try:
+                        review = CALL_FUNCTIONS[reviewer_id](api_key, review_prompt)
+                        reviews[author_id] = (reviewer_id, review)
+                    except Exception as e:
+                        reviews[author_id] = (reviewer_id, f"❌ 검토 오류: {str(e)}")
 
-            for author_id, (reviewer_id, review_text) in reviews.items():
-                with st.expander(
-                    f"**{AI_CONFIG[reviewer_id]['name']}** → **{AI_CONFIG[author_id]['name']}** 검토",
-                    expanded=False,
-                ):
-                    st.markdown(review_text or "*검토 없음*")
+            # 상호 지적 요약 (모델 A → 모델 B: 어떤 점 지적)
+            reviews_summary = [
+                {
+                    "검토자": AI_CONFIG[reviewer_id]["name"],
+                    "피검토자": AI_CONFIG[author_id]["name"],
+                    "지적_요약": (text[:400] + "..." if len(text) > 400 else text)
+                    if "❌" not in text
+                    else text,
+                    "전문": text,
+                }
+                for author_id, (reviewer_id, text) in reviews.items()
+            ]
 
             # Round 3: A가 B의 지적을 반영하여 수정
-            st.markdown("#### 3단계: 지적 반영 후 수정안")
             revised_responses = {}
-            with st.spinner("각 AI가 검토 사항을 반영하여 수정안을 작성하고 있습니다..."):
+            with st.spinner("AI들이 토론 중입니다... (3/4) 지적 반영 후 수정안 작성"):
                 for author_id in valid_initial:
                     if author_id not in reviews:
                         revised_responses[author_id] = valid_initial[author_id]
@@ -409,13 +406,17 @@ if analyze_button:
                     except Exception as e:
                         revised_responses[author_id] = valid_initial[author_id]
 
-            for ai_id, resp in revised_responses.items():
-                with st.expander(f"**{AI_CONFIG[ai_id]['name']}** 수정안", expanded=True):
-                    st.markdown(resp or "*답변 없음*")
-
             valid_responses = {
                 k: v for k, v in revised_responses.items()
                 if v and "❌" not in v
+            }
+            raw_responses = {
+                ai_id: {
+                    "초기 답변": initial_responses.get(ai_id, "-"),
+                    "검토자 지적": reviews.get(ai_id, (None, "-"))[1],
+                    "수정안": revised_responses.get(ai_id, initial_responses.get(ai_id, "-")),
+                }
+                for ai_id in initial_responses
             }
 
     st.markdown("---")
@@ -424,7 +425,21 @@ if analyze_button:
     # 최종 Consensus Report
     # -------------------------------------------------------------------------
     if len(valid_responses) < 1:
-        st.warning("API 호출에 오류가 있어 Consensus Report를 생성할 수 없습니다.")
+        st.warning("API 호출에 오류가 있어 Consensus Report를 생성할 수 없습니다. 아래 Raw Data 탭에서 각 모델별 오류를 확인하세요.")
+        # Raw Data 탭은 오류 시에도 표시 (실제 오류 메시지 확인용)
+        tab_err, tab_raw = st.tabs(["⚠️ 안내", "🔍 모델별 개별 답변 (오류 확인)"])
+        with tab_raw:
+            st.markdown("#### 모델별 응답 / 오류 메시지")
+            for ai_id, data in raw_responses.items():
+                if isinstance(data, dict):
+                    with st.expander(f"**{AI_CONFIG[ai_id]['name']}**", expanded=True):
+                        for key, val in data.items():
+                            st.markdown(f"**{key}**")
+                            st.markdown(val or "*없음*")
+                            st.markdown("")
+                else:
+                    with st.expander(f"**{AI_CONFIG[ai_id]['name']}**", expanded=True):
+                        st.markdown(data or "*답변 없음*")
         st.stop()
 
     st.markdown("### 📊 Consensus Report (최종 종합)")
@@ -462,9 +477,42 @@ if analyze_button:
     synthesizer_id = list(valid_responses.keys())[0]
     synthesizer_key = api_keys[synthesizer_id]
 
-    with st.spinner(f"{AI_CONFIG[synthesizer_id]['name']}가 최종 종합을 작성하고 있습니다..."):
+    with st.spinner("AI들이 토론 중입니다... 최종 합의 리포트 작성"):
         try:
             consensus = CALL_FUNCTIONS[synthesizer_id](synthesizer_key, consensus_prompt)
-            st.markdown(consensus)
         except Exception as e:
+            consensus = None
             st.error(f"Consensus Report 생성 중 오류: {str(e)}")
+
+    # -------------------------------------------------------------------------
+    # 결과 표시: st.tabs (최종 합의 리포트 | 모델별 개별 답변)
+    # -------------------------------------------------------------------------
+    if consensus:
+        tab1, tab2 = st.tabs(["🎯 최종 합의 리포트 (Consensus)", "🔍 모델별 개별 답변 (Raw Data)"])
+
+        with tab1:
+            st.markdown(consensus)
+
+        with tab2:
+            # 심층 토론 모드: 상호 지적 요약 섹션
+            if is_deep_mode and reviews_summary:
+                st.markdown("#### 📌 상호 지적 요약")
+                st.caption("모델 A가 모델 B의 어떤 점을 지적했는지")
+                for item in reviews_summary:
+                    st.markdown(
+                        f"**{item['검토자']}** → **{item['피검토자']}**: {item['지적_요약']}"
+                    )
+                st.markdown("---")
+
+            # 각 AI 모델별 답변 (st.expander로 접어서 표시)
+            st.markdown("#### 모델별 답변")
+            for ai_id, data in raw_responses.items():
+                if isinstance(data, dict):
+                    with st.expander(f"**{AI_CONFIG[ai_id]['name']}**", expanded=False):
+                        for key, val in data.items():
+                            st.markdown(f"**{key}**")
+                            st.markdown(val or "*없음*")
+                            st.markdown("")
+                else:
+                    with st.expander(f"**{AI_CONFIG[ai_id]['name']}**", expanded=False):
+                        st.markdown(data or "*답변 없음*")
