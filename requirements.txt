@@ -1,0 +1,8 @@
+# Consensus AI: 논문 분석 프로토타입에 필요한 Python 패키지
+# 설치: pip install -r requirements.txt
+
+streamlit>=1.28.0
+openai>=1.0.0
+google-genai>=1.0.0
+anthropic>=0.18.0
+pymupdf>=1.24.0
